@@ -1,0 +1,20 @@
+{
+  "name": "Snake Arena",
+  "genre": "arcade",
+  "dim": "2D",
+  "mode": "Drop-in",
+  "players": "2–30",
+  "hook": "Eat to grow. Make others crash into you.",
+  "how": "Steer with the mouse or a finger and hold to boost. Hit another snake and you turn into food for everyone else.",
+  "controls": "Mouse or touch to steer, hold or tap Boost to speed up",
+  "uses": [
+    ["Leaderboard", "Each player's longest snake, shown when you crash."],
+    ["Bots", "Bots fill the arena until enough people join."],
+    ["Live sync", "Every snake moves for everyone at once."]
+  ],
+  "ideas": [
+    "Make it underwater, with fish instead of snakes",
+    "Add a speed pad in the middle of the map",
+    "Let players pick a skin before they join"
+  ]
+}

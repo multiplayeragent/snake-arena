@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Snake Arena</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #0b1020; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #eef2f8; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: crosshair; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 3px #000a; }
+  #len { top: max(12px, env(safe-area-inset-top)); left: 14px; font-weight: 700; font-size: 20px; }
+  #net { bottom: max(12px, env(safe-area-inset-bottom)); left: 14px; font-size: 13px; opacity: .75; }
+  #top { top: max(12px, env(safe-area-inset-top)); right: 14px; font-size: 13px; min-width: 150px; }
+  #top div { display: flex; justify-content: space-between; gap: 12px; }
+  #top .me { color: #ffd166; font-weight: 700; }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0b1020b0; }
+  #over[hidden], #boost[hidden] { display: none; }
+  .card { width: min(340px, 88vw); padding: 22px; border-radius: 16px; background: #141c33; border: 1px solid #ffffff22; text-align: center; }
+  .card h2 { margin: 0 0 4px; font-size: 24px; }
+  .card ol { text-align: left; margin: 14px 0; padding-left: 26px; font-size: 14px; min-height: 40px; }
+  .card li { display: flex; justify-content: space-between; } .card li::marker { color: #8a93ad; }
+  .card li.me { color: #ffd166; font-weight: 700; }
+  button.go { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #4cc38a; color: #08130d; font: 700 17px system-ui, sans-serif; cursor: pointer; }
+  #boost { position: fixed; right: max(18px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); width: 84px; height: 84px; border-radius: 50%;
+           border: 2px solid #ffffff55; background: #ffffff1c; color: #fff; font: 700 14px system-ui, sans-serif; touch-action: none; }
+  #boost.on { background: #ffd16655; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="len"></div>
+<div class="hud" id="top"></div>
+<div class="hud" id="net">Connecting…</div>
+<button id="boost" hidden>BOOST</button>
+<div id="over" hidden>
+  <div class="card">
+    <h2 id="overTitle">You crashed</h2>
+    <div id="overScore"></div>
+    <ol id="board"><li>Loading the leaderboard…</li></ol>
+    <button class="go" id="again">Play again</button>
+  </div>
+</div>
+<script>
+/* ═══ SNAKE ARENA · a Multiplayer Agent starter ═══════════════════════════════════════
+ * Eat to grow. Make others crash into you. Drop-in, 2–30 players; bots fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ every number worth tuning: arena, speeds, bots, food
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   WORLD (HOST) .. food, drops and bots. Only the host writes these.
+ *   MY SNAKE ...... steering, growing, crashing. Each player writes only its own.
+ *   DRAW .......... camera, arena, food, snakes, minimap
+ *   HUD & OVER .... room top 5, game-over card, leaderboard
+ *   INPUT ......... mouse, touch, keyboard
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `s` (one packed JSON field: head, angle, length,
+ *     body points, alive) about 15 times a second, `hb` (heartbeat) once a second, and
+ *     `n`/`h` (name, hue) once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last
+ *     3s), worked out every frame. Only the host writes the shared fields `food`, `drops`
+ *     and `bots`. A new host adopts what is already in state and carries on.
+ *   - Everyone else sends intents to the host: "eat" {k, x, y} and "crash" {b}.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "longest": each player's best length, shown when you crash.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  arena: 1100,        // arena radius in world px (the world is 0..2*arena on both axes)
+  seats: 6,           // bots fill the room up to this many snakes
+  food: 90,           // pellets kept on the map
+  dropCap: 60,        // most pellets crashed snakes leave behind at once
+  speed: 150,         // px/s
+  boostSpeed: 270,    // px/s while boosting
+  boostCost: 5,       // length lost per second of boost
+  turn: 3.4,          // rad/s
+  startLen: 14,       // body points at spawn
+  gap: 8,             // px between body points
+  board: "longest",   // leaderboard name
+};
+const BOT_NAMES = ["Noodle", "Ziggy", "Slinky", "Mamba", "Pretzel", "Sir Hiss", "Wiggles", "Kaa", "Squiggle", "Viper"];
+const PALETTE = [8, 32, 52, 140, 172, 200, 262, 300, 330];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'snake-arena',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const join = MP.join({ ...MP_CONNECT });
+    const mp = await Promise.race([join, new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+
+const parse = (v, fallback) => { if (typeof v !== "string") return fallback; try { return JSON.parse(v); } catch { return fallback; } };
+const memo = new Map();
+/** A shared JSON field, parsed once per change (read-only: never mutate what this returns). */
+function shared(key, fallback, map = (v) => v) {
+  const raw = S.shared[key], m = memo.get(key);
+  if (m && m.raw === raw) return m.v;
+  const v = map(parse(raw, fallback));
+  memo.set(key, { raw, v });
+  return v;
+}
+let net = null;      // the room client (real or local)
+let S = { entities: { players: {} }, shared: {} }; // latest state
+const seenHb = new Map(); // sessionId -> { hb, at } on OUR clock
+
+/** Players whose heartbeat moved in the last 3s (plus us), sorted by sessionId. */
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+
+// ── WORLD (HOST) ────────────────────────────────────────────────────────────────────
+const R = CONFIG.arena, C = { x: R, y: R };
+const rnd = (a, b) => a + Math.random() * (b - a);
+const dist2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+const width = (len) => 13 + Math.sqrt(len) * 0.9;
+function randomSpot(margin = 0.85) { const a = rnd(0, Math.PI * 2), r = Math.sqrt(Math.random()) * R * margin; return { x: C.x + Math.cos(a) * r, y: C.y + Math.sin(a) * r }; }
+const pellet = () => { const p = randomSpot(0.95); return [Math.round(p.x), Math.round(p.y), Math.floor(Math.random() * PALETTE.length)]; };
+
+const world = { food: [], drops: [], bots: new Map(), wasHost: false, dirty: { food: false, drops: false }, lastWrite: 0, lastBots: 0 };
+
+/** Become host: take over the world exactly as state has it. */
+function adoptWorld() {
+  world.food = parse(S.shared.food, []);
+  world.drops = parse(S.shared.drops, []);
+  world.bots.clear();
+  for (const b of parse(S.shared.bots, [])) {
+    world.bots.set(b.i, { id: b.i, name: b.n, hue: b.h, len: b.l, alive: !!b.a, respawnAt: performance.now() + 2000,
+      path: resample((b.b || []).map(([x, y]) => ({ x, y }))), angle: 0, boost: false, turnAt: 0, target: null });
+  }
+  for (const b of world.bots.values()) if (b.path.length > 1) b.angle = Math.atan2(b.path[0].y - b.path[1].y, b.path[0].x - b.path[1].x);
+  if (world.food.length < CONFIG.food) { while (world.food.length < CONFIG.food) world.food.push(pellet()); world.dirty.food = true; }
+}
+
+/** Points `CONFIG.gap` apart along a rough line (a sampled body back to a full one). */
+function resample(pts) {
+  if (pts.length < 2) return pts.length ? [pts[0]] : [];
+  const out = [{ ...pts[0] }];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], d = Math.hypot(b.x - a.x, b.y - a.y), n = Math.max(1, Math.round(d / CONFIG.gap));
+    for (let k = 1; k <= n; k++) out.push({ x: a.x + (b.x - a.x) * k / n, y: a.y + (b.y - a.y) * k / n });
+  }
+  return out;
+}
+
+function spawnBot(id) {
+  const used = new Set([...world.bots.values()].map((b) => b.name));
+  const name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
+  const at = randomSpot(0.7), angle = rnd(0, Math.PI * 2);
+  const path = []; for (let i = 0; i < CONFIG.startLen; i++) path.push({ x: at.x - Math.cos(angle) * i * CONFIG.gap, y: at.y - Math.sin(angle) * i * CONFIG.gap });
+  world.bots.set(id, { id, name, hue: PALETTE[Math.floor(Math.random() * PALETTE.length)], len: CONFIG.startLen, alive: true, path, angle, boost: false, turnAt: 0, target: null });
+}
+
+/** Leave pellets where a body was. */
+function dropBody(points) {
+  for (let i = 0; i < points.length; i += 2) {
+    const p = points[i];
+    world.drops.push([Math.round(p.x + rnd(-6, 6)), Math.round(p.y + rnd(-6, 6)), Math.floor(Math.random() * PALETTE.length)]);
+  }
+  if (world.drops.length > CONFIG.dropCap) world.drops.splice(0, world.drops.length - CONFIG.dropCap);
+  world.dirty.drops = true;
+}
+
+/** An "eat" intent: take the pellet at (x, y) if it's still there and the eater is near it. */
+function applyEat(from, msg) {
+  const list = msg.k === "d" ? world.drops : world.food;
+  const i = list.findIndex((p) => p[0] === msg.x && p[1] === msg.y);
+  if (i < 0) return;
+  const head = from === "bot" ? null : snakeOf(from);
+  if (head && dist2(head, { x: msg.x, y: msg.y }) > 140 * 140) return; // too far: refuse
+  if (msg.k === "d") { list.splice(i, 1); world.dirty.drops = true; } else { list[i] = pellet(); world.dirty.food = true; }
+}
+
+/** Every body the bots can hit: the humans' sampled bodies and the bots' full ones. */
+function allBodies() {
+  const out = [];
+  for (const s of humanSnakes()) if (s.alive) out.push({ id: s.id, pts: s.pts, w: width(s.len) });
+  for (const b of world.bots.values()) if (b.alive) out.push({ id: b.id, pts: b.path, w: width(b.len) });
+  if (me.alive) out.push({ id: net.sessionId, pts: me.path, w: width(me.len) }); // the host's own snake
+  return out;
+}
+
+function hitsBody(head, selfId, bodies, myW) {
+  for (const b of bodies) {
+    const skip = b.id === selfId ? 8 : 0; // a snake never hits its own neck
+    for (let i = skip; i < b.pts.length - 1; i++) {
+      if (segDist2(head, b.pts[i], b.pts[i + 1]) < ((b.w + myW) * 0.42) ** 2) return true;
+    }
+  }
+  return false;
+}
+function segDist2(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, l = dx * dx + dy * dy;
+  const t = l ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l)) : 0;
+  return (p.x - a.x - t * dx) ** 2 + (p.y - a.y - t * dy) ** 2;
+}
+
+/** One bot's brain: go for food, steer away from walls and bodies ahead. */
+function steerBot(b, bodies, dt, now) {
+  const head = b.path[0];
+  if (!b.target || now > b.turnAt || !b.target.live()) {
+    let best = null, bd = 420 * 420;
+    for (const list of [world.drops, world.food]) for (const p of list) { const d = dist2(head, { x: p[0], y: p[1] }); if (d < bd) { bd = d; best = p; } }
+    b.target = best ? { x: best[0], y: best[1], live: () => world.food.includes(best) || world.drops.includes(best) } : { ...randomSpot(0.6), live: () => true };
+    b.turnAt = now + rnd(700, 2200);
+  }
+  let want = Math.atan2(b.target.y - head.y, b.target.x - head.x);
+  const look = (ang) => ({ x: head.x + Math.cos(ang) * 70, y: head.y + Math.sin(ang) * 70 });
+  const danger = (ang) => { const p = look(ang); return Math.hypot(p.x - C.x, p.y - C.y) > R - 30 || hitsBody(p, b.id, bodies, width(b.len)); };
+  if (danger(b.angle)) { for (const d of [0.7, -0.7, 1.4, -1.4, 2.2, -2.2]) if (!danger(b.angle + d)) { want = b.angle + d; break; } }
+  let diff = Math.atan2(Math.sin(want - b.angle), Math.cos(want - b.angle));
+  b.angle += Math.max(-CONFIG.turn * dt, Math.min(CONFIG.turn * dt, diff));
+  b.boost = b.len > 30 && Math.random() < 0.004 ? true : b.boost && Math.random() > 0.01;
+}
+
+function moveSnake(sn, dt) {
+  const speed = sn.boost && sn.len > 12 ? CONFIG.boostSpeed : CONFIG.speed;
+  if (sn.boost && sn.len > 12) sn.len -= CONFIG.boostCost * dt;
+  const h = sn.path[0];
+  const nh = { x: h.x + Math.cos(sn.angle) * speed * dt, y: h.y + Math.sin(sn.angle) * speed * dt };
+  if (sn.path.length < 2 || Math.hypot(nh.x - sn.path[1].x, nh.y - sn.path[1].y) >= CONFIG.gap) sn.path.unshift(nh); else sn.path[0] = nh;
+  while (sn.path.length > Math.floor(sn.len)) sn.path.pop();
+}
+
+/** Pellets within reach of a head. */
+function pelletsNear(head, w) {
+  const out = [], r2 = (w * 0.5 + 10) ** 2, host = isHost();
+  for (const p of host ? world.food : shared("food", [])) if (dist2(head, { x: p[0], y: p[1] }) < r2) out.push({ k: "f", p });
+  for (const p of host ? world.drops : shared("drops", [])) if (dist2(head, { x: p[0], y: p[1] }) < r2) out.push({ k: "d", p });
+  return out;
+}
+
+function hostTick(dt, now) {
+  if (!world.wasHost) { adoptWorld(); world.wasHost = true; }
+  const humans = livePlayers().length - (ATTRACT ? 1 : 0);
+  const wantBots = Math.max(0, CONFIG.seats - humans);
+  if (world.bots.size < wantBots && now - (world.lastSpawn || 0) > 800) { spawnBot("b" + Math.random().toString(36).slice(2, 6)); world.lastSpawn = now; }
+  if (world.bots.size > wantBots) { const [id] = world.bots.keys(); world.bots.delete(id); }
+  const bodies = allBodies();
+  for (const b of world.bots.values()) {
+    if (!b.alive) { if (now > b.respawnAt) { const id = b.id; world.bots.delete(id); spawnBot(id); } continue; }
+    steerBot(b, bodies, dt, now);
+    moveSnake(b, dt);
+    const head = b.path[0];
+    for (const { k, p } of pelletsNear(head, width(b.len))) { b.len += k === "d" ? 3 : 1; applyEat("bot", { k, x: p[0], y: p[1] }); }
+    if (Math.hypot(head.x - C.x, head.y - C.y) > R || hitsBody(head, b.id, bodies, width(b.len))) {
+      b.alive = false; b.respawnAt = now + 3000; dropBody(b.path);
+    }
+  }
+  if (now - world.lastBots > 100) { // ~10/s, one message for every bot
+    world.lastBots = now;
+    const step = (p) => Math.max(1, Math.ceil(p.length / 18));
+    net.setShared("bots", JSON.stringify([...world.bots.values()].map((b) => ({ i: b.id, n: b.name, h: b.hue, l: Math.round(b.len), a: b.alive ? 1 : 0,
+      b: b.path.filter((_, i) => i % step(b.path) === 0 || i === b.path.length - 1).map((p) => [Math.round(p.x), Math.round(p.y)]) }))));
+  }
+  if (now - world.lastWrite > 125) { // food and drops only when they changed, at most 8/s
+    world.lastWrite = now;
+    if (world.dirty.food) { net.setShared("food", JSON.stringify(world.food)); world.dirty.food = false; }
+    if (world.dirty.drops) { net.setShared("drops", JSON.stringify(world.drops)); world.dirty.drops = false; }
+  }
+}
+
+// ── MY SNAKE ────────────────────────────────────────────────────────────────────────
+const brain = { target: null, turnAt: 0 };
+const me = { path: [], len: CONFIG.startLen, angle: 0, want: 0, boost: false, alive: false, best: 0, eaten: new Set(), lastSend: 0 };
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
+  ["Swift", "Tiny", "Mega", "Sneaky", "Lucky", "Turbo"][Math.floor(Math.random() * 6)] + " " + ["Eel", "Cobra", "Worm", "Python", "Adder"][Math.floor(Math.random() * 5)];
+let myHue = PALETTE[0]; // picked on join: the first hue nobody in the room has
+/** Two people joined at once with one hue: the one with the higher sessionId picks a free one. */
+function fixHue() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
+  if (!others.some(([id, p]) => Number(p.h) === myHue && id < net.sessionId)) return;
+  const taken = new Set(others.map(([, p]) => Number(p.h))), free = PALETTE.find((h) => !taken.has(h));
+  if (free !== undefined) { myHue = free; net.me.set("h", free); }
+}
+
+function spawnMe() {
+  const at = randomSpot(0.6);
+  me.angle = me.want = Math.atan2(C.y - at.y, C.x - at.x);
+  me.path = []; for (let i = 0; i < CONFIG.startLen; i++) me.path.push({ x: at.x - Math.cos(me.angle) * i * CONFIG.gap, y: at.y - Math.sin(me.angle) * i * CONFIG.gap });
+  me.len = CONFIG.startLen; me.best = me.len; me.alive = true; me.eaten.clear();
+  document.getElementById("over").hidden = true;
+}
+
+function crash() {
+  me.alive = false;
+  const body = sampled(me.path, 24).map(([x, y]) => ({ x, y }));
+  if (isHost()) dropBody(body); else net.send("crash", { b: body.map((p) => [Math.round(p.x), Math.round(p.y)]) });
+  publish(true);
+  if (ATTRACT) { setTimeout(spawnMe, 600); return; }
+  showOver();
+}
+
+const sampled = (path, max) => { const k = Math.max(1, Math.ceil(path.length / max)); return path.filter((_, i) => i % k === 0 || i === path.length - 1).map((p) => [Math.round(p.x), Math.round(p.y)]); };
+
+function publish(force) {
+  const now = performance.now();
+  if (!force && now - me.lastSend < 66) return; // ~15/s
+  me.lastSend = now;
+  const h = me.path[0] || C;
+  net.me.set("s", JSON.stringify({ x: Math.round(h.x), y: Math.round(h.y), l: Math.round(me.len), a: me.alive ? 1 : 0, b: me.alive ? sampled(me.path, 32) : [] }));
+}
+
+function myTick(dt) {
+  if (!me.alive) return;
+  if (ATTRACT) { // the preview drives your snake with the bot brain
+    Object.assign(brain, { id: net.sessionId, path: me.path, len: me.len, angle: me.angle });
+    steerBot(brain, allBodies(), dt, performance.now()); me.want = brain.angle; me.boost = brain.boost;
+  }
+  const diff = Math.atan2(Math.sin(me.want - me.angle), Math.cos(me.want - me.angle));
+  me.angle += Math.max(-CONFIG.turn * dt, Math.min(CONFIG.turn * dt, diff));
+  moveSnake(me, dt);
+  const head = me.path[0], w = width(me.len);
+  for (const { k, p } of pelletsNear(head, w)) {
+    const key = p[0] + "," + p[1];
+    if (me.eaten.has(key)) continue;
+    me.eaten.add(key); me.len += k === "d" ? 3 : 1;
+    if (isHost()) applyEat(net.sessionId, { k, x: p[0], y: p[1] }); else net.send("eat", { k, x: p[0], y: p[1] });
+  }
+  me.best = Math.max(me.best, Math.floor(me.len));
+  const others = isHost() ? allBodies().filter((b) => b.id !== net.sessionId) : otherBodies();
+  if (Math.hypot(head.x - C.x, head.y - C.y) > R || hitsBody(head, net.sessionId, others, w)) crash();
+  publish(false);
+}
+
+// Everyone else's snakes, read from state (parsed once per change).
+const parsedCache = new Map();
+function humanSnakes() {
+  const out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id === net.sessionId) continue;
+    let c = parsedCache.get(id);
+    if (!c || c.raw !== p.s) { const s = parse(p.s, null); c = { raw: p.s, s }; parsedCache.set(id, c); }
+    if (!c.s) continue;
+    out.push({ id, name: p.n || "Player", hue: Number(p.h) || 200, len: c.s.l, alive: !!c.s.a, x: c.s.x, y: c.s.y, pts: (c.s.b || []).map(([x, y]) => ({ x, y })) });
+  }
+  return out;
+}
+function botSnakes() {
+  if (isHost()) return [...world.bots.values()].map((b) => ({ id: b.id, name: b.name, hue: b.hue, len: b.len, alive: b.alive, pts: b.path, bot: true }));
+  return shared("bots", [], (list) => list.map((b) => ({ id: b.i, name: b.n, hue: b.h, len: b.l, alive: !!b.a, pts: (b.b || []).map(([x, y]) => ({ x, y })), bot: true })));
+}
+const otherBodies = () => [...humanSnakes(), ...botSnakes()].filter((s) => s.alive).map((s) => ({ id: s.id, pts: s.pts, w: width(s.len) }));
+const snakeOf = (id) => { const s = humanSnakes().find((h) => h.id === id); return s && s.alive ? { x: s.x, y: s.y } : null; };
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const cam = { x: R, y: R, z: 1 };
+
+function draw() {
+  const focus = me.path[0] && (me.alive || !ATTRACT) ? me.path[0] : C;
+  cam.x += (focus.x - cam.x) * 0.12; cam.y += (focus.y - cam.y) * 0.12;
+  const zoom = (Math.min(W, H) / 820) * Math.max(0.62, 1.15 - me.len / 500) * (ATTRACT ? 1.7 : 1);
+  cam.z += (zoom - cam.z) * 0.05;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#0b1020"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(DPR * cam.z, 0, 0, DPR * cam.z, DPR * (W / 2 - cam.x * cam.z), DPR * (H / 2 - cam.y * cam.z));
+  // arena floor + grid
+  ctx.save(); ctx.beginPath(); ctx.arc(C.x, C.y, R, 0, Math.PI * 2); ctx.fillStyle = "#121a30"; ctx.fill(); ctx.clip();
+  ctx.strokeStyle = "#ffffff0d"; ctx.lineWidth = 2; ctx.beginPath();
+  for (let g = 0; g <= R * 2; g += 60) { ctx.moveTo(g, 0); ctx.lineTo(g, R * 2); ctx.moveTo(0, g); ctx.lineTo(R * 2, g); }
+  ctx.stroke(); ctx.restore();
+  ctx.beginPath(); ctx.arc(C.x, C.y, R, 0, Math.PI * 2); ctx.strokeStyle = "#ff5d73"; ctx.lineWidth = 8; ctx.stroke();
+  // food
+  const t = performance.now() / 300;
+  const foodList = isHost() ? world.food : shared("food", []);
+  const dropList = isHost() ? world.drops : shared("drops", []);
+  for (const [list, r] of [[foodList, 6], [dropList, 9]]) for (const p of list) {
+    if (me.eaten.has(p[0] + "," + p[1])) continue;
+    const hue = PALETTE[p[2] % PALETTE.length], pulse = 1 + Math.sin(t + p[0]) * 0.15;
+    ctx.fillStyle = `hsla(${hue},90%,60%,.25)`; ctx.beginPath(); ctx.arc(p[0], p[1], r * 2 * pulse, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `hsl(${hue},95%,65%)`; ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2); ctx.fill();
+  }
+  // snakes
+  const all = [...botSnakes(), ...humanSnakes()];
+  if (me.alive) all.push({ id: net.sessionId, name: "You", hue: myHue, len: me.len, alive: true, pts: me.path, mine: true });
+  for (const s of all) if (s.alive) drawSnake(s);
+  drawMinimap(all);
+}
+
+function drawSnake(s) {
+  const pts = s.pts; if (!pts.length) return;
+  const w = width(s.len);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  const path = () => {
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length - 1; i++) { const mx = (pts[i].x + pts[i + 1].x) / 2, my = (pts[i].y + pts[i + 1].y) / 2; ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my); }
+    if (pts.length > 1) ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+  };
+  path(); ctx.strokeStyle = `hsl(${s.hue},70%,28%)`; ctx.lineWidth = w + 4; ctx.stroke();
+  path(); ctx.strokeStyle = `hsl(${s.hue},85%,56%)`; ctx.lineWidth = w; ctx.stroke();
+  const h = pts[0], n = pts[1] || { x: h.x - 1, y: h.y }, a = Math.atan2(h.y - n.y, h.x - n.x);
+  for (const side of [-1, 1]) {
+    const ex = h.x + Math.cos(a + side * 0.6) * w * 0.32, ey = h.y + Math.sin(a + side * 0.6) * w * 0.32;
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(ex, ey, w * 0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#111"; ctx.beginPath(); ctx.arc(ex + Math.cos(a) * w * 0.07, ey + Math.sin(a) * w * 0.07, w * 0.1, 0, Math.PI * 2); ctx.fill();
+  }
+  if (!ATTRACT) {
+    ctx.font = `600 ${Math.max(12, w * 0.9)}px system-ui, sans-serif`; ctx.textAlign = "center";
+    ctx.fillStyle = s.mine ? "#ffd166" : "#ffffffcc"; ctx.fillText(s.name, h.x, h.y - w - 8);
+  }
+}
+
+function drawMinimap(all) {
+  const size = Math.min(120, W * 0.24), x0 = W - size - 14, y0 = H - size - 14 - (touchUI ? 100 : 0), k = size / (R * 2);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#00000066"; ctx.beginPath(); ctx.arc(x0 + size / 2, y0 + size / 2, size / 2, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#ff5d7388"; ctx.lineWidth = 1.5; ctx.stroke();
+  for (const s of all) if (s.alive && s.pts[0]) {
+    ctx.fillStyle = s.mine ? "#ffd166" : `hsl(${s.hue},80%,60%)`;
+    ctx.beginPath(); ctx.arc(x0 + s.pts[0].x * k, y0 + s.pts[0].y * k, s.mine ? 3.5 : 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// ── HUD & OVER ──────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+let board = null;
+function hud() {
+  if (ATTRACT) { $("len").textContent = ""; $("top").innerHTML = ""; $("net").textContent = ""; return; }
+  $("len").textContent = me.alive ? `Length ${Math.floor(me.len)}` : "";
+  const rows = [...humanSnakes(), ...botSnakes()].filter((s) => s.alive).map((s) => ({ name: s.name, len: Math.floor(s.len) }));
+  if (me.alive) rows.push({ name: "You", len: Math.floor(me.len), mine: true });
+  rows.sort((a, b) => b.len - a.len);
+  $("top").innerHTML = rows.slice(0, 5).map((r) => `<div class="${r.mine ? "me" : ""}"><span>${esc(r.name)}</span><span>${r.len}</span></div>`).join("");
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the bots" : ""}`;
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function showOver() {
+  $("over").hidden = false;
+  $("overScore").textContent = `Longest this time: ${me.best}`;
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading the leaderboard…</li>";
+  board.submit(me.best).catch(() => null).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li><span>${esc(e.username || "Player")}</span><span>${e.score}</span></li>`).join("") : "<li>No scores yet. You're first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = spawnMe;
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches;
+const keys = new Set();
+cv.addEventListener("pointermove", (e) => { if (e.pointerType === "touch" && !e.isPrimary) return; me.want = Math.atan2(e.clientY - H / 2, e.clientX - W / 2); keys.clear(); });
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); me.want = Math.atan2(e.clientY - H / 2, e.clientX - W / 2); if (e.pointerType === "mouse") me.boost = true; });
+addEventListener("pointerup", (e) => { if (e.pointerType === "mouse") me.boost = false; });
+const boostBtn = $("boost");
+boostBtn.hidden = !touchUI || ATTRACT;
+boostBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); me.boost = true; boostBtn.classList.add("on"); });
+for (const ev of ["pointerup", "pointercancel", "pointerleave"]) boostBtn.addEventListener(ev, () => { me.boost = false; boostBtn.classList.remove("on"); });
+addEventListener("keydown", (e) => { keys.add(e.key); if (e.key === " " || e.key === "ArrowUp" || e.key === "w") me.boost = true; });
+addEventListener("keyup", (e) => { keys.delete(e.key); if (e.key === " " || e.key === "ArrowUp" || e.key === "w") me.boost = false; });
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0;
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
+  if (keys.has("ArrowLeft") || keys.has("a")) me.want = me.angle - 0.6;
+  if (keys.has("ArrowRight") || keys.has("d")) me.want = me.angle + 0.6;
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixHue(); }
+  if (isHost()) hostTick(dt, now); else world.wasHost = false;
+  myTick(dt);
+  draw();
+  if (now - lastHud > 200) { lastHud = now; hud(); }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("eat", (msg, from) => { if (isHost() && msg) applyEat(from, msg); });
+  net.on("crash", (msg) => { if (isHost() && msg && Array.isArray(msg.b)) dropBody(msg.b.slice(0, 40).map(([x, y]) => ({ x, y }))); });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => Number(p.h)));
+  myHue = PALETTE.find((h) => !taken.has(h)) ?? PALETTE[Math.floor(Math.random() * PALETTE.length)];
+  net.me.set({ n: myName, h: myHue, hb: Date.now() });
+  if (ATTRACT) { CONFIG.seats = 8; CONFIG.startLen = 34; }
+  spawnMe();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
