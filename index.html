@@ -16,7 +16,7 @@
   #top .me { color: #ffd166; font-weight: 700; }
   #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0b1020b0; }
   #over[hidden], #boost[hidden] { display: none; }
-  .card { width: min(340px, 88vw); padding: 22px; border-radius: 16px; background: #141c33; border: 1px solid #ffffff22; text-align: center; }
+  .card { box-sizing: border-box; width: min(386px, calc(100vw - 32px)); padding: 22px; border-radius: 16px; background: #141c33; border: 1px solid #ffffff22; text-align: center; }
   .card h2 { margin: 0 0 4px; font-size: 24px; }
   .card ol { text-align: left; margin: 14px 0; padding-left: 26px; font-size: 14px; min-height: 40px; }
   .card li { display: flex; justify-content: space-between; } .card li::marker { color: #8a93ad; }
@@ -185,9 +185,10 @@ function resample(pts) {
 function spawnBot(id) {
   const used = new Set([...world.bots.values()].map((b) => b.name));
   const name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
+  const hues = new Set([myHue, ...humanSnakes().map((s) => s.hue), ...[...world.bots.values()].map((b) => b.hue)]), free = PALETTE.filter((h) => !hues.has(h));
   const at = randomSpot(0.7), angle = rnd(0, Math.PI * 2);
   const path = []; for (let i = 0; i < CONFIG.startLen; i++) path.push({ x: at.x - Math.cos(angle) * i * CONFIG.gap, y: at.y - Math.sin(angle) * i * CONFIG.gap });
-  world.bots.set(id, { id, name, hue: PALETTE[Math.floor(Math.random() * PALETTE.length)], len: CONFIG.startLen, alive: true, path, angle, boost: false, turnAt: 0, target: null });
+  world.bots.set(id, { id, name, hue: free.length ? free[Math.floor(Math.random() * free.length)] : PALETTE[Math.floor(Math.random() * PALETTE.length)], len: CONFIG.startLen, alive: true, path, angle, boost: false, turnAt: 0, target: null });
 }
 
 /** Leave pellets where a body was. */
@@ -305,11 +306,11 @@ const me = { path: [], len: CONFIG.startLen, angle: 0, want: 0, boost: false, al
 const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
   ["Swift", "Tiny", "Mega", "Sneaky", "Lucky", "Turbo"][Math.floor(Math.random() * 6)] + " " + ["Eel", "Cobra", "Worm", "Python", "Adder"][Math.floor(Math.random() * 5)];
 let myHue = PALETTE[0]; // picked on join: the first hue nobody in the room has
-/** Two people joined at once with one hue: the one with the higher sessionId picks a free one. */
+/** Two people joined at once with one hue (or a bot has mine): the one with the higher sessionId picks a free one. */
 function fixHue() {
-  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
-  if (!others.some(([id, p]) => Number(p.h) === myHue && id < net.sessionId)) return;
-  const taken = new Set(others.map(([, p]) => Number(p.h))), free = PALETTE.find((h) => !taken.has(h));
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId), botHues = botSnakes().map((b) => b.hue);
+  if (!others.some(([id, p]) => Number(p.h) === myHue && id < net.sessionId) && !botHues.includes(myHue)) return;
+  const taken = new Set([...others.map(([, p]) => Number(p.h)), ...botHues]), free = PALETTE.find((h) => !taken.has(h));
   if (free !== undefined) { myHue = free; net.me.set("h", free); }
 }
 
@@ -365,9 +366,9 @@ function myTick(dt) {
 // Everyone else's snakes, read from state (parsed once per change).
 const parsedCache = new Map();
 function humanSnakes() {
-  const out = [];
+  const out = [], live = new Set(livePlayers());
   for (const [id, p] of Object.entries(S.entities.players || {})) {
-    if (id === net.sessionId) continue;
+    if (id === net.sessionId || !live.has(id)) continue; // a closed tab stays in state ~30s: skip it
     let c = parsedCache.get(id);
     if (!c || c.raw !== p.s) { const s = parse(p.s, null); c = { raw: p.s, s }; parsedCache.set(id, c); }
     if (!c.s) continue;
@@ -457,6 +458,7 @@ function drawMinimap(all) {
 // ── HUD & OVER ──────────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 let board = null;
+let dropped = false; // true while the connection is down: the HUD keeps showing "Reconnecting…"
 function hud() {
   if (ATTRACT) { $("len").textContent = ""; $("top").innerHTML = ""; $("net").textContent = ""; return; }
   $("len").textContent = me.alive ? `Length ${Math.floor(me.len)}` : "";
@@ -465,7 +467,7 @@ function hud() {
   rows.sort((a, b) => b.len - a.len);
   $("top").innerHTML = rows.slice(0, 5).map((r) => `<div class="${r.mine ? "me" : ""}"><span>${esc(r.name)}</span><span>${r.len}</span></div>`).join("");
   const n = livePlayers().length;
-  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the bots" : ""}`;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the bots" : ""}`;
 }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
@@ -514,9 +516,10 @@ function frame(now) {
   net.onState((st) => { S = st; });
   net.on("eat", (msg, from) => { if (isHost() && msg) applyEat(from, msg); });
   net.on("crash", (msg) => { if (isHost() && msg && Array.isArray(msg.b)) dropBody(msg.b.slice(0, 40).map(([x, y]) => ({ x, y }))); });
-  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
-  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => Number(p.h)));
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => Number(p.h)), ...parse(S.shared.bots, []).map((b) => b.h)]);
   myHue = PALETTE.find((h) => !taken.has(h)) ?? PALETTE[Math.floor(Math.random() * PALETTE.length)];
   net.me.set({ n: myName, h: myHue, hb: Date.now() });
   if (ATTRACT) { CONFIG.seats = 8; CONFIG.startLen = 34; }
