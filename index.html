@@ -500,6 +500,7 @@ document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: fal
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
 let last = performance.now(), lastHb = 0, lastHud = 0;
 function frame(now) {
+  requestAnimationFrame(frame);
   const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
   if (keys.has("ArrowLeft") || keys.has("a")) me.want = me.angle - 0.6;
   if (keys.has("ArrowRight") || keys.has("d")) me.want = me.angle + 0.6;
@@ -508,7 +509,6 @@ function frame(now) {
   myTick(dt);
   draw();
   if (now - lastHud > 200) { lastHud = now; hud(); }
-  requestAnimationFrame(frame);
 }
 
 (async function start() {
