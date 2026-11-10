@@ -146,7 +146,9 @@ function livePlayers() {
   }
   return out.sort();
 }
-const isHost = () => livePlayers()[0] === net.sessionId;
+let frameAt = 0, wokeAt = -1e9; // my loop's last frame, and when it last woke from a stall (a frozen or background tab)
+/** Never while my own loop is stalled, nor for 0.7s after it wakes: the room moved on without me, so the newer state lands first. */
+const isHost = () => livePlayers()[0] === net.sessionId && performance.now() - frameAt < 1000 && performance.now() - wokeAt > 700;
 
 // ── WORLD (HOST) ────────────────────────────────────────────────────────────────────
 const R = CONFIG.arena, C = { x: R, y: R };
@@ -501,6 +503,9 @@ document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: fal
 let last = performance.now(), lastHb = 0, lastHud = 0;
 function frame(now) {
   requestAnimationFrame(frame);
+  const t0 = performance.now(); // not `now`: the first frame after a freeze can be stamped from before it ended
+  if (frameAt && t0 - frameAt > 1000) { wokeAt = t0; world.wasHost = false; } // woke from a stall: drop my host copy, adopt state again (see isHost)
+  frameAt = t0;
   const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
   if (keys.has("ArrowLeft") || keys.has("a")) me.want = me.angle - 0.6;
   if (keys.has("ArrowRight") || keys.has("d")) me.want = me.angle + 0.6;
