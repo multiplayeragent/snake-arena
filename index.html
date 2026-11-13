@@ -79,6 +79,8 @@ const CONFIG = {
   turn: 3.4,          // rad/s
   startLen: 14,       // body points at spawn
   gap: 8,             // px between body points
+  botHunt: 0.4,       // chance, each time a bot rethinks (every 0.7-2.2s), that it goes to cut off a snake near it
+  botHuntLen: 22,     // bots shorter than this only eat
   board: "longest",   // leaderboard name
 };
 const BOT_NAMES = ["Noodle", "Ziggy", "Slinky", "Mamba", "Pretzel", "Sir Hiss", "Wiggles", "Kaa", "Squiggle", "Viper"];
@@ -184,11 +186,24 @@ function resample(pts) {
   return out;
 }
 
+/** A spot with no snake close by (the best of a few random tries), so nobody spawns into a body. */
+function clearSpot(margin) {
+  const bodies = isHost() ? allBodies() : otherBodies();
+  let best = null, bestD = -1;
+  for (let i = 0; i < 20 && bestD < 220 * 220; i++) {
+    const p = randomSpot(margin);
+    let d = 1e12;
+    for (const o of bodies) for (const q of o.pts) d = Math.min(d, dist2(p, q));
+    if (d > bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
 function spawnBot(id) {
   const used = new Set([...world.bots.values()].map((b) => b.name));
   const name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
   const hues = new Set([myHue, ...humanSnakes().map((s) => s.hue), ...[...world.bots.values()].map((b) => b.hue)]), free = PALETTE.filter((h) => !hues.has(h));
-  const at = randomSpot(0.7), angle = rnd(0, Math.PI * 2);
+  const at = clearSpot(0.7), angle = Math.atan2(C.y - at.y, C.x - at.x) + rnd(-1.2, 1.2); // roughly toward the middle, so its body trails away from the wall
   const path = []; for (let i = 0; i < CONFIG.startLen; i++) path.push({ x: at.x - Math.cos(angle) * i * CONFIG.gap, y: at.y - Math.sin(angle) * i * CONFIG.gap });
   world.bots.set(id, { id, name, hue: free.length ? free[Math.floor(Math.random() * free.length)] : PALETTE[Math.floor(Math.random() * PALETTE.length)], len: CONFIG.startLen, alive: true, path, angle, boost: false, turnAt: 0, target: null });
 }
@@ -237,7 +252,7 @@ function segDist2(p, a, b) {
   return (p.x - a.x - t * dx) ** 2 + (p.y - a.y - t * dy) ** 2;
 }
 
-/** One bot's brain: go for food, steer away from walls and bodies ahead. */
+/** One bot's brain: go for food or cut off a nearby snake (boosting), steer away from walls and bodies ahead. */
 function steerBot(b, bodies, dt, now) {
   const head = b.path[0];
   if (!b.target || now > b.turnAt || !b.target.live()) {
@@ -245,14 +260,25 @@ function steerBot(b, bodies, dt, now) {
     for (const list of [world.drops, world.food]) for (const p of list) { const d = dist2(head, { x: p[0], y: p[1] }); if (d < bd) { bd = d; best = p; } }
     b.target = best ? { x: best[0], y: best[1], live: () => world.food.includes(best) || world.drops.includes(best) } : { ...randomSpot(0.6), live: () => true };
     b.turnAt = now + rnd(700, 2200);
+    b.prey = null; // now and then, a bot with some length picks a snake close by to cut off (a bot or a person)
+    if (b.len > CONFIG.botHuntLen && Math.random() < CONFIG.botHunt) {
+      const near = bodies.filter((o) => o.id !== b.id && o.pts.length > 1 && dist2(head, o.pts[0]) < 260 * 260);
+      if (near.length) b.prey = near[Math.floor(Math.random() * near.length)].id;
+    }
   }
-  let want = Math.atan2(b.target.y - head.y, b.target.x - head.x);
+  let want = Math.atan2(b.target.y - head.y, b.target.x - head.x), cutting = false;
+  const prey = b.prey && bodies.find((o) => o.id === b.prey && o.pts.length > 1);
+  if (prey) { // aim across the front of its head, a little off
+    const ph = prey.pts[0], pa = Math.atan2(ph.y - prey.pts[1].y, ph.x - prey.pts[1].x), d = Math.sqrt(dist2(head, ph));
+    want = Math.atan2(ph.y + Math.sin(pa) * (60 + d * 0.4) - head.y, ph.x + Math.cos(pa) * (60 + d * 0.4) - head.x) + rnd(-0.15, 0.15);
+    cutting = d < 220;
+  }
   const look = (ang) => ({ x: head.x + Math.cos(ang) * 70, y: head.y + Math.sin(ang) * 70 });
   const danger = (ang) => { const p = look(ang); return Math.hypot(p.x - C.x, p.y - C.y) > R - 30 || hitsBody(p, b.id, bodies, width(b.len)); };
   if (danger(b.angle)) { for (const d of [0.7, -0.7, 1.4, -1.4, 2.2, -2.2]) if (!danger(b.angle + d)) { want = b.angle + d; break; } }
   let diff = Math.atan2(Math.sin(want - b.angle), Math.cos(want - b.angle));
   b.angle += Math.max(-CONFIG.turn * dt, Math.min(CONFIG.turn * dt, diff));
-  b.boost = b.len > 30 && Math.random() < 0.004 ? true : b.boost && Math.random() > 0.01;
+  b.boost = cutting && b.len > 18 ? true : b.len > 30 && Math.random() < 0.004 ? true : b.boost && !prey && Math.random() > 0.01;
 }
 
 function moveSnake(sn, dt) {
@@ -317,7 +343,7 @@ function fixHue() {
 }
 
 function spawnMe() {
-  const at = randomSpot(0.6);
+  const at = clearSpot(0.6);
   me.angle = me.want = Math.atan2(C.y - at.y, C.x - at.x);
   me.path = []; for (let i = 0; i < CONFIG.startLen; i++) me.path.push({ x: at.x - Math.cos(me.angle) * i * CONFIG.gap, y: at.y - Math.sin(me.angle) * i * CONFIG.gap });
   me.len = CONFIG.startLen; me.best = me.len; me.alive = true; me.eaten.clear();
@@ -372,9 +398,9 @@ function humanSnakes() {
   for (const [id, p] of Object.entries(S.entities.players || {})) {
     if (id === net.sessionId || !live.has(id)) continue; // a closed tab stays in state ~30s: skip it
     let c = parsedCache.get(id);
-    if (!c || c.raw !== p.s) { const s = parse(p.s, null); c = { raw: p.s, s }; parsedCache.set(id, c); }
+    if (!c || c.raw !== p.s) { const s = parse(p.s, null); c = { raw: p.s, s, pts: ((s && s.b) || []).map(([x, y]) => ({ x, y })) }; parsedCache.set(id, c); }
     if (!c.s) continue;
-    out.push({ id, name: p.n || "Player", hue: Number(p.h) || 200, len: c.s.l, alive: !!c.s.a, x: c.s.x, y: c.s.y, pts: (c.s.b || []).map(([x, y]) => ({ x, y })) });
+    out.push({ id, name: p.n || "Player", hue: Number(p.h) || 200, len: c.s.l, alive: !!c.s.a, x: c.s.x, y: c.s.y, pts: c.pts });
   }
   return out;
 }
@@ -392,7 +418,7 @@ function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = i
 addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
 const cam = { x: R, y: R, z: 1 };
 
-function draw() {
+function draw(dt, now) {
   const focus = me.path[0] && (me.alive || !ATTRACT) ? me.path[0] : C;
   cam.x += (focus.x - cam.x) * 0.12; cam.y += (focus.y - cam.y) * 0.12;
   const zoom = (Math.min(W, H) / 820) * Math.max(0.62, 1.15 - me.len / 500) * (ATTRACT ? 1.7 : 1);
@@ -417,10 +443,34 @@ function draw() {
     ctx.fillStyle = `hsl(${hue},95%,65%)`; ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2); ctx.fill();
   }
   // snakes
-  const all = [...botSnakes(), ...humanSnakes()];
+  const all = [...botSnakes(), ...humanSnakes()].map((s) => (s.alive ? smoothed(s, dt, now) : s));
+  for (const id of views.keys()) if (!all.some((s) => s.alive && s.id === id)) views.delete(id);
   if (me.alive) all.push({ id: net.sessionId, name: "You", hue: myHue, len: me.len, alive: true, pts: me.path, mine: true });
   for (const s of all) if (s.alive) drawSnake(s);
   drawMinimap(all);
+}
+
+// Snakes that arrive as snapshots (people, and bots on a screen that isn't the host's) come 10-15 times a second.
+// Each is drawn eased toward its latest snapshot and carried forward along its heading by the snapshot's age, so it glides.
+const views = new Map(); // id -> { raw (the snapshot's points), at, pts (what is drawn) }
+function smoothed(s, dt, now) {
+  if ((s.bot && isHost()) || s.pts.length < 2) return s; // the host's own bots are exact
+  let v = views.get(s.id);
+  if (!v) { v = { raw: null, at: now, pts: s.pts.map((p) => ({ ...p })) }; views.set(s.id, v); }
+  if (v.raw !== s.pts) { // a new snapshot
+    if (v.pts.length !== s.pts.length) { // it grew or shrank: keep the drawn head where it is, unless it respawned elsewhere
+      const dx = v.pts[0].x - s.pts[0].x, dy = v.pts[0].y - s.pts[0].y, far = Math.hypot(dx, dy) > 150;
+      v.pts = s.pts.map((p) => ({ x: p.x + (far ? 0 : dx), y: p.y + (far ? 0 : dy) }));
+    }
+    v.raw = s.pts; v.at = now;
+  }
+  const h = s.pts[0], n = s.pts[1], a = Math.atan2(h.y - n.y, h.x - n.x), ahead = Math.min(0.12, (now - v.at) / 1000) * CONFIG.speed;
+  const k = 1 - Math.pow(0.00001, dt), fx = Math.cos(a) * ahead, fy = Math.sin(a) * ahead;
+  for (let i = 0; i < v.pts.length; i++) {
+    const f = 1 - i / v.pts.length; // the head moves forward, the tail stays put
+    v.pts[i].x += (s.pts[i].x + fx * f - v.pts[i].x) * k; v.pts[i].y += (s.pts[i].y + fy * f - v.pts[i].y) * k;
+  }
+  return { ...s, pts: v.pts };
 }
 
 function drawSnake(s) {
@@ -483,7 +533,7 @@ function showOver() {
     list.innerHTML = entries.length ? entries.map((e) => `<li><span>${esc(e.username || "Player")}</span><span>${e.score}</span></li>`).join("") : "<li>No scores yet. You're first.</li>";
   }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
 }
-$("again").onclick = spawnMe;
+$("again").onclick = () => { $("again").blur(); spawnMe(); }; // blur: a focused button would restart you on the next Space or Enter
 
 // ── INPUT ───────────────────────────────────────────────────────────────────────────
 const touchUI = matchMedia("(pointer: coarse)").matches;
@@ -495,8 +545,11 @@ const boostBtn = $("boost");
 boostBtn.hidden = !touchUI || ATTRACT;
 boostBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); me.boost = true; boostBtn.classList.add("on"); });
 for (const ev of ["pointerup", "pointercancel", "pointerleave"]) boostBtn.addEventListener(ev, () => { me.boost = false; boostBtn.classList.remove("on"); });
-addEventListener("keydown", (e) => { keys.add(e.key); if (e.key === " " || e.key === "ArrowUp" || e.key === "w") me.boost = true; });
-addEventListener("keyup", (e) => { keys.delete(e.key); if (e.key === " " || e.key === "ArrowUp" || e.key === "w") me.boost = false; });
+const keyName = (e) => (e.key.length === 1 ? e.key.toLowerCase() : e.key); // "A" with Shift or Caps Lock is still "a"
+addEventListener("keydown", (e) => { const k = keyName(e); keys.add(k); if (k === " " || k === "ArrowUp" || k === "w") { e.preventDefault(); me.boost = true; } });
+addEventListener("keyup", (e) => { const k = keyName(e); keys.delete(k); if (k === " " || k === "ArrowUp" || k === "w") me.boost = false; });
+addEventListener("blur", () => { keys.clear(); me.boost = false; boostBtn.classList.remove("on"); }); // a key released in another window never sends keyup
+cv.addEventListener("contextmenu", (e) => e.preventDefault()); // right-click boosts too, without the menu
 document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
@@ -512,7 +565,7 @@ function frame(now) {
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixHue(); }
   if (isHost()) hostTick(dt, now); else world.wasHost = false;
   myTick(dt);
-  draw();
+  draw(dt, t0);
   if (now - lastHud > 200) { lastHud = now; hud(); }
 }
 
